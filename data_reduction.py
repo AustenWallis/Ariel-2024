@@ -31,4 +31,7 @@ $image = \\frac{exposure - bias - dark}{flat - bias}$
 
 - dead: [train/test]/[planet_id]/[ARIS-CHO/FSG1]_calibration/dead.parquet - mask, continumm fit to smooth out the data
 - linear_corr: [train/test]/[planet_id]/[ARIS-CHO/FSG1]_calibration/linear_corr.parquet - mask, linear correction to the data
+
+
+bahahababahababah
 """
