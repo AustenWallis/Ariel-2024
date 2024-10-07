@@ -625,7 +625,7 @@ X_test = torch.tensor(X_test, dtype=torch.float32)
 # TODO Add validation set and Early stopping
 def objective(trial):
     # Suggest hyperparameters
-    code_dim = trial.suggest_int('code_dim', low=5, high=200, step=1)
+    code_dim = trial.suggest_int('code_dim', low=5, high=15, step=1)
     batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
     learning_rate = trial.suggest_loguniform('learning_rate', 1e-8, 1e-1)
     number_of_layers = trial.suggest_int('number_of_layers', low=2, high=10, step=1)
@@ -696,107 +696,293 @@ print("Best hyperparameters:")
 print(study.best_params)
 print(f"Best test loss: {study.best_value}")
 
-# retrain with best model 
-best_code_dim = study.best_params['code_dim']
-best_batch_size = study.best_params['batch_size']
-best_learning_rate = study.best_params['learning_rate']
-best_number_of_layers = study.best_params['number_of_layers']
+# ... [Your existing code up to the Optuna study]
 
-# Create DataLoaders with the best batch_size
-train_loader = DataLoader(X_train, batch_size=best_batch_size, shuffle=True)
-validation_loader = DataLoader(X_val, batch_size=best_batch_size, shuffle=True)
-test_loader = DataLoader(X_test, batch_size=best_batch_size, shuffle=False)
+# After running the Optuna study
+N = 5  # Number of top models to include in the ensemble
+
+# Retrieve the top N trials
+completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+completed_trials.sort(key=lambda t: t.value)
+top_trials = completed_trials[:N]
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# Initialize the model with the best code_dim
-model = Autoencoder(input_dim=X_train.shape[1], code_dim=best_code_dim, layer_num=best_number_of_layers)
-model.to(device)
 
-# Define loss function and optimizer with the best learning_rate
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=best_learning_rate)
-
-early_stopping = EarlyStopping(patience=20, verbose=True, path='best_model.pth')
-# Train the model with more epochs
-n_epochs = 1000  # Increase epochs for final training
-for epoch in range(n_epochs):
-    model.train()
-    train_loss = 0.0
-    for batch_data in train_loader:
-        batch_data = batch_data.to(device)
-        optimizer.zero_grad()
-        outputs = model(batch_data)
-        loss = criterion(outputs, batch_data)
-        loss.backward()
-        optimizer.step()
-        train_loss += loss.item()
-    train_loss /= len(train_loader)
-    print(f'Epoch {epoch+1}, Train Loss: {train_loss}')
+# Re-train and save each model
+for idx, trial in enumerate(top_trials):
+    # Retrieve hyperparameters
+    best_code_dim = trial.params['code_dim']
+    best_batch_size = trial.params['batch_size']
+    best_learning_rate = trial.params['learning_rate']
+    best_number_of_layers = trial.params['number_of_layers']
     
-    model.eval()
-    val_loss = 0.0
-    with torch.no_grad():
-        for batch_data in validation_loader:
+    # Create DataLoaders
+    train_loader = DataLoader(X_train, batch_size=best_batch_size, shuffle=True)
+    validation_loader = DataLoader(X_val, batch_size=best_batch_size, shuffle=False)
+    
+    # Initialize the model
+    model = Autoencoder(input_dim=X_train.shape[1], code_dim=best_code_dim, layer_num=best_number_of_layers)
+    model.to(device)
+    
+    # Define loss and optimizer
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=best_learning_rate)
+    
+    # EarlyStopping with unique checkpoint path
+    early_stopping = EarlyStopping(patience=20, verbose=False, path=f'best_model_{idx}.pth')
+    
+    # Training loop
+    n_epochs = 1000
+    for epoch in range(n_epochs):
+        model.train()
+        train_loss = 0.0
+        for batch_data in train_loader:
             batch_data = batch_data.to(device)
+            optimizer.zero_grad()
             outputs = model(batch_data)
             loss = criterion(outputs, batch_data)
-            val_loss += loss.item()
-    val_loss /= len(validation_loader)
-    print(f'Epoch {epoch+1}, Validation Loss: {val_loss:.5f}')
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+        print(f'Model {idx+1}, Epoch {epoch+1}, Train Loss: {train_loss:.5f}')
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for batch_data in validation_loader:
+                batch_data = batch_data.to(device)
+                outputs = model(batch_data)
+                loss = criterion(outputs, batch_data)
+                val_loss += loss.item()
+        val_loss /= len(validation_loader)
+        print(f'Model {idx+1}, Epoch {epoch+1}, Validation Loss: {val_loss:.5f}')
+        
+        # Early stopping
+        early_stopping(val_loss, model)
+        if early_stopping.early_stop:
+            print(f"Early stopping for model {idx+1}")
+            break
     
-    early_stopping(val_loss, model)
-    if early_stopping.early_stop:
-        print("Early stopping")
-        break
+    # Load the best model
+    model.load_state_dict(torch.load(f'best_model_{idx}.pth'))
+    
+    # Save the model for ensemble
+    torch.save(model.state_dict(), f'autoencoder_{idx}.pth')
 
-# Load the best model
-model.load_state_dict(torch.load('best_model.pth'))
+# Load models for inference
+ensemble_models = []
+for idx in range(N):
+    # Retrieve hyperparameters
+    code_dim = top_trials[idx].params['code_dim']
+    number_of_layers = top_trials[idx].params['number_of_layers']
+    #batch_size = top_trials[idx].params['batch_size']
+    
+    # Initialize and load model
+    model = Autoencoder(input_dim=X_test.shape[1], code_dim=code_dim, layer_num=number_of_layers)
+    model.load_state_dict(torch.load(f'autoencoder_{idx}.pth'))
+    model.to(device)
+    model.eval()
+    ensemble_models.append(model)
 
-# Evaluate on test data
-model.eval()
-test_loss = 0.0
+# Evaluate ensemble on test data
+reconstructed_data_list = []
+test_loader = DataLoader(X_test, batch_size=64, shuffle=False)
 with torch.no_grad():
     for batch_data in test_loader:
         batch_data = batch_data.to(device)
-        outputs = model(batch_data)
-        loss = criterion(outputs, batch_data)
-        test_loss += loss.item()
-test_loss /= len(test_loader)
-print(f'Final Test Loss: {test_loss}')
+        ensemble_outputs = []
+        for model in ensemble_models:
+            outputs = model(batch_data)
+            ensemble_outputs.append(outputs.cpu().numpy())
+        
+        # Average the outputs
+        average_output = np.mean(ensemble_outputs, axis=0)
+        reconstructed_data_list.append(average_output)
+
+# Combine reconstructed batches
+reconstructed_data = np.vstack(reconstructed_data_list)
+
+# Compute test loss for the ensemble
+test_loss = np.mean((X_test.numpy() - reconstructed_data) ** 2)
+print(f'Ensemble Test Loss: {test_loss}')
+
+# # retrain with best model 
+# best_code_dim = study.best_params['code_dim']
+# best_batch_size = study.best_params['batch_size']
+# best_learning_rate = study.best_params['learning_rate']
+# best_number_of_layers = study.best_params['number_of_layers']
+
+# # Create DataLoaders with the best batch_size
+# train_loader = DataLoader(X_train, batch_size=best_batch_size, shuffle=True)
+# validation_loader = DataLoader(X_val, batch_size=best_batch_size, shuffle=True)
+# test_loader = DataLoader(X_test, batch_size=best_batch_size, shuffle=False)
+
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# # Initialize the model with the best code_dim
+# model = Autoencoder(input_dim=X_train.shape[1], code_dim=best_code_dim, layer_num=best_number_of_layers)
+# model.to(device)
+
+# # Define loss function and optimizer with the best learning_rate
+# criterion = nn.MSELoss()
+# optimizer = optim.Adam(model.parameters(), lr=best_learning_rate)
+
+# early_stopping = EarlyStopping(patience=20, verbose=True, path='best_model.pth')
+# # Train the model with more epochs
+# n_epochs = 1000  # Increase epochs for final training
+# for epoch in range(n_epochs):
+#     model.train()
+#     train_loss = 0.0
+#     for batch_data in train_loader:
+#         batch_data = batch_data.to(device)
+#         optimizer.zero_grad()
+#         outputs = model(batch_data)
+#         loss = criterion(outputs, batch_data)
+#         loss.backward()
+#         optimizer.step()
+#         train_loss += loss.item()
+#     train_loss /= len(train_loader)
+#     print(f'Epoch {epoch+1}, Train Loss: {train_loss}')
+    
+#     model.eval()
+#     val_loss = 0.0
+#     with torch.no_grad():
+#         for batch_data in validation_loader:
+#             batch_data = batch_data.to(device)
+#             outputs = model(batch_data)
+#             loss = criterion(outputs, batch_data)
+#             val_loss += loss.item()
+#     val_loss /= len(validation_loader)
+#     print(f'Epoch {epoch+1}, Validation Loss: {val_loss:.5f}')
+    
+#     early_stopping(val_loss, model)
+#     if early_stopping.early_stop:
+#         print("Early stopping")
+#         break
+
+# # Load the best model
+# model.load_state_dict(torch.load('best_model.pth'))
+
+# # Evaluate on test data
+# model.eval()
+# test_loss = 0.0
+# with torch.no_grad():
+#     for batch_data in test_loader:
+#         batch_data = batch_data.to(device)
+#         outputs = model(batch_data)
+#         loss = criterion(outputs, batch_data)
+#         test_loss += loss.item()
+# test_loss /= len(test_loader)
+# print(f'Final Test Loss: {test_loss}')
     
 
 # save the best model for use
 torch.save(model.state_dict(), 'autoencoder.pth')
 
 # %%
-
-# reload the saved model from autoencoder.pth
-model = Autoencoder(input_dim=X_train.shape[1], code_dim=best_code_dim, layer_num=best_number_of_layers)
-model.load_state_dict(torch.load('autoencoder.pth'))
-model.eval()
-
-# %%
-# use the autoencode to see how well it can reconstruct the data
 from scipy.ndimage import gaussian_filter1d
-for planet in train_labels_airs[:50]:
-    #standardize the data
-    planet_copy = planet.copy()
-    planet = train_scaler.transform(planet.reshape(1, -1))
-    planet = torch.tensor(planet, dtype=torch.float32)
-    reconstructed = model(planet).detach().numpy()
-    reconstructed = train_scaler.inverse_transform(reconstructed)
-    reconstructed = reconstructed.reshape(282)
-    # gaussian smoothing reconstruction
-    reconstructed = gaussian_filter1d(reconstructed, 1)
-    # plot 10ppm confidence interval on planet_copy
+
+# Prepare to store reconstructed data from each model
+reconstructed_models = []
+
+# Loop over each model in the ensemble
+for idx in range(N):
+    # Retrieve hyperparameters for this model from 'top_trials'
+    code_dim = top_trials[idx].params['code_dim']
+    number_of_layers = top_trials[idx].params['number_of_layers']
     
+    # Initialize the model with the correct architecture
+    model = Autoencoder(input_dim=X_train.shape[1], code_dim=code_dim, layer_num=number_of_layers)
+    
+    # Load the saved state dictionary into the model
+    model.load_state_dict(torch.load(f'best_model_{idx}.pth'))
+    model.to(device)
+    model.eval()
+    
+    # List to store reconstructed planets for this model
+    reconstructed_planets = []
+    
+    # Reconstruct the first 15 planets
+    for planet in train_labels_airs[:15]:
+        # Standardize the data using the same scaler used during training
+        planet_copy = planet.copy()
+        planet_scaled = train_scaler.transform(planet_copy.reshape(1, -1))
+        planet_tensor = torch.tensor(planet_scaled, dtype=torch.float32).to(device)
+        
+        # Pass the data through the autoencoder
+        reconstructed = model(planet_tensor).detach().cpu().numpy()
+        
+        # Inverse transform to get back to original scale
+        reconstructed = train_scaler.inverse_transform(reconstructed)
+        reconstructed = reconstructed.reshape(-1)
+        
+        # Apply Gaussian smoothing if desired
+        reconstructed_smoothed = gaussian_filter1d(reconstructed, sigma=1)
+        
+        # Store the reconstructed planet
+        reconstructed_planets.append(reconstructed_smoothed)
+    
+    # Add the reconstructed planets from this model to the list
+    reconstructed_models.append(reconstructed_planets)
+
+# Plotting the results
+for index in range(len(train_labels_airs[:15])):
+    planet_copy = train_labels_airs[index]
     max_planet = planet_copy + 1e-5
     min_planet = planet_copy - 1e-5
-    plt.fill_between(np.arange(282), max_planet, min_planet, alpha=0.5)
-    plt.plot(planet_copy, label='Original')
-    plt.plot(reconstructed, label='Reconstructed')
+    
+    # min max of the ensamble models TODO
+    min_ensamble = np.min([np.min(reconstructed_models[i][index]) for i in range(N)])
+    max_ensamble = np.max([np.max(reconstructed_models[i][index]) for i in range(N)])
+    
+    # Plot the reconstructions from each model
+    for model_idx, reconstructed_planets in enumerate(reconstructed_models):
+        plt.plot(reconstructed_planets[index], label=f'Model {model_idx+1} Reconstruction')
+    
+    # Plot the original planet and confidence interval
+    
+    plt.fill_between(np.arange(len(planet_copy)), max_ensamble, min_ensamble, alpha=0.5, label='Confidence Interval Ensamble')
+    plt.fill_between(np.arange(len(planet_copy)), max_planet, min_planet, alpha=0.5, label='Confidence Interval Planet')
+    plt.plot(planet_copy, label='Original', color='black', linewidth=2)
     plt.legend()
+    plt.title(f'Planet {index+1} Reconstruction')
+    plt.xlabel('Feature Index')
+    plt.ylabel('Value')
     plt.show()
+
+# # reload the saved model from autoencoder.pth
+# reconstructed_models = []
+# model = Autoencoder(input_dim=X_train.shape[1], code_dim=best_code_dim, layer_num=best_number_of_layers)
+# for idx in range(N):
+#     model.load_state_dict(torch.load(f'best_model_{idx}.pth'))
+#     model.to(device)
+#     model.eval()
+#     # use the autoencoder to see how well it can reconstruct the data
+#     reconstructed_planets = []
+#     for planet in train_labels_airs[:15]:
+#         #standardize the data
+#         planet_copy = planet.copy()
+#         planet = train_scaler.transform(planet.reshape(1, -1))
+#         planet = torch.tensor(planet, dtype=torch.float32)
+#         reconstructed = model(planet).detach().numpy()
+#         reconstructed = train_scaler.inverse_transform(reconstructed)
+#         reconstructed = reconstructed.reshape(282)
+#         # gaussian smoothing reconstruction
+#         reconstructed_planets.append(gaussian_filter1d(reconstructed, 1))
+#         # plot 10ppm confidence interval on planet_copy
+#     reconstructed_models.append(reconstructed_planets)
+# for index, planet in enumerate(train_labels_airs[:15]):
+#     planet_copy = planet.copy()
+#     max_planet = planet_copy + 1e-5
+#     min_planet = planet_copy - 1e-5
+#     for i in reconstructed_models:
+#         plt.plot(i[index])
+#     plt.fill_between(np.arange(282), max_planet, min_planet, alpha=0.5)
+#     plt.plot(planet_copy, label='Original')
+#     # plt.plot(reconstructed, label='Reconstructed')
+#     plt.legend()
+#     plt.show()
 
 
 # %%
