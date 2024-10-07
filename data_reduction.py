@@ -59,7 +59,7 @@ import gc
 print("Data Reduction to Science Images")
 ############################################
 # Import the data
-print(os.listdir())
+# print(os.listdir())
 
 # Metadata Files
 train_adc_info = pd.read_csv('train_adc_info.csv') # ADC gain and offset and star column
@@ -117,20 +117,78 @@ def correct_calibration(signal, dark, flat, read, delta_T=None):
     """
     print(type(signal), type(dark), type(flat), type(read), type(delta_T))
     print(np.shape(signal), np.shape(dark), np.shape(flat), np.shape(read), np.shape(delta_T))
+#     plt.imshow(signal[4550])
+# # horizontal colourbar
+#     plt.colorbar(orientation='horizontal')
+#     plt.title('Signal')
+#     plt.show()
+#     plt.imshow(read)
+#     plt.colorbar(orientation='horizontal')
+#     plt.title('Bias')
+#     plt.show()
+    # plt.imshow(dark)
+    # plt.colorbar(orientation='horizontal')
+    # plt.title('Dark')
+    # plt.show()
+
+
+    
     if delta_T is None:
-        processed = (signal - read - dark) / (flat - read)
+        numerator = signal - read - dark
+        denominator = flat #- read
+        processed = numerator / denominator
+        # processed = (signal - read - dark) / (flat - read)
     else:
-        processed = (signal - read - (dark*delta_T[:, np.newaxis, np.newaxis])) / (flat - read)
+        print(np.max(delta_T), np.min(delta_T), 'delta_T')
+        numerator = signal - read - (dark*delta_T[:, np.newaxis, np.newaxis])
+        # plt.imshow(dark*delta_T[:, np.newaxis, np.newaxis][4550])
+        # plt.colorbar(orientation='horizontal')
+        # plt.title('Dark*delta_T')
+        # plt.show()
+        
+        # plt.imshow(numerator[4550])
+        # plt.colorbar(orientation='horizontal')
+        # plt.title('Numerator')
+        # plt.show()
+        denominator = flat#-read
+        
+        # plt.imshow(flat)
+        # plt.colorbar(orientation='horizontal')
+        # plt.title('Flat')
+        # plt.show()
+        # plt.imshow(read)
+        # plt.colorbar(orientation='horizontal')
+        # plt.title('Read')
+        # plt.show()
+        print(np.max(numerator), np.min(numerator), 'numerator')  
+        # plt.imshow(denominator)
+        # plt.colorbar(orientation='horizontal')
+        # plt.title('Denominator')
+        # plt.show()
+  
+        print(np.max(denominator), np.min(denominator), 'denominator')
+        processed = numerator / denominator
+        # processed = (signal - read - (dark*delta_T[:, np.newaxis, np.newaxis])) / (flat - read)
+        
+        # plt.imshow(processed[4550])
+        # plt.colorbar(orientation='horizontal')
+        # plt.title('Processed')
+        # plt.show()
+        print(np.max(processed), np.min(processed), 'processed')
+        
     return processed
 
 def correct_dead(signal, dead):
-    """TODO
-
+    """Convert the signal to a masked_array to mask out the dead pixels.
+    
     Args:
         signal (_type_): _description_
         dead (_type_): _description_
     """
-    return signal * dead
+    print(np.shape(signal), np.shape(dead), 'signal and dead')
+    dead_expanded = np.tile(dead, (signal.shape[0], 1, 1))
+    print(np.shape(dead_expanded), 'dead expanded') 
+    return np.ma.masked_array(signal, mask=dead_expanded)
 
 def correct_linear_corr(signal, linear_corr):
     """TODO
@@ -150,7 +208,10 @@ def correlate_double_sampling(signal):
     Args:
         signal (array): science image
     """
+    print(np.shape(signal), 'signal before ')
+    # signal = signal[:,1::2,:,:] - signal[:,::2,:,:]
     signal = np.diff(signal, axis=1)[:,::2, :] # selecting 1-0, 3-2, 5-4 .. so on
+    print(np.shape(signal), 'signal after')
     return signal
 
 def spectra_to_1D(signal):
@@ -197,9 +258,9 @@ def reduce_data(planet_index, planet_id, path_to_data, adc_info, instrument='AIR
     # User Switches
     gain = True
     calibration = True
-    dead = False
+    dead = True
     linear_corr = False
-    corr_double_sampling = False
+    corr_double_sampling = True
     spectra_sum = True
     
     planet_dict = {}
@@ -208,33 +269,46 @@ def reduce_data(planet_index, planet_id, path_to_data, adc_info, instrument='AIR
     if instrument == 'AIRS-CH0':
         signal = pd.read_parquet(
             os.path.join(path_to_data, planet_id, 'AIRS-CH0_signal.parquet')).values.reshape(11250, 32, 356)
+        # cut wavelengths down to 282 (clean wavelengths)
+        signal = signal[:, :, 39:321]
+        print(np.max(signal), np.min(signal), 'signal') 
         
         if calibration:
             # dark np.shape(32,356)
             dark = pd.read_parquet(
                 os.path.join(path_to_data, planet_id, 'AIRS-CH0_calibration', 'dark.parquet')).values
+            dark = dark[:, 39:321]
+            print(np.max(dark), np.min(dark), 'dark')
             # flat np.shape(32, 356)
             flat = pd.read_parquet(
                 os.path.join(path_to_data, planet_id, 'AIRS-CH0_calibration', 'flat.parquet')).values
+            flat = flat[:, 39:321]
+            print(np.max(flat), np.min(flat), 'flat')
             # read np.shape(32, 356)
             read = pd.read_parquet(
                 os.path.join(path_to_data, planet_id, 'AIRS-CH0_calibration', 'read.parquet')).values
+            read = read[:, 39:321]
+            print(np.max(read), np.min(read), 'read')
             delta_t = axis_info['AIRS-CH0-integration_time'].dropna().values
+            
+            
             
             signal = correct_calibration(signal, dark, flat, read, delta_t)
         
-        plot_signal(signal[0][15])
+        #plot_signal(signal[0][15])
         
         if gain:
+            print(adc_info['AIRS-CH0_adc_gain'][planet_index], adc_info['AIRS-CH0_adc_offset'][planet_index], 'gain and offset')
             signal = correct_gain_offset(signal,
                                          adc_info['AIRS-CH0_adc_gain'][planet_index],
                                          adc_info['AIRS-CH0_adc_offset'][planet_index]
                                          )
-        plot_signal(signal[0][15])
+        #plot_signal(signal[0][15])
         
         if dead:
             dead = pd.read_parquet(
                 os.path.join(path_to_data, planet_id, 'AIRS-CH0_calibration', 'dead.parquet')).values
+            dead = dead[:, 39:321]
             signal = correct_dead(signal, dead)
         
         if linear_corr:
@@ -244,13 +318,15 @@ def reduce_data(planet_index, planet_id, path_to_data, adc_info, instrument='AIR
 
         if corr_double_sampling:
             signal = correlate_double_sampling(signal)
-        plot_signal(signal[0][15])
+        #plot_signal(signal[0][15])
+        
         # cut wavelengths down to 282 (clean wavelengths)
-        signal = signal[:, :, 39:321]
+        #signal = signal[:, :, 39:321]
         
         if spectra_sum:
             signal = spectra_to_1D(signal)
-        plot_signal(signal[0][15])
+        #plot_signal(signal[0][15])
+        
     elif instrument == 'FGS1':
         signal = pd.read_parquet(
             os.path.join(path_to_data, planet_id, 'FGS1_signal.parquet')).values.reshape(135000, 32, 32)
@@ -312,9 +388,9 @@ for planet_index, planet_id in enumerate(test_planet_ids):
     test_planet_data_airs[planet_id] = reduce_data(planet_index, planet_id, path_to_test, adc_info['test'], instrument='AIRS-CH0')
     test_planet_data_fgs1[planet_id] = reduce_data(planet_index, planet_id, path_to_test, adc_info['test'], instrument='FGS1')
     
-for planet_index, planet_id in enumerate(train_planet_ids[0:1]):
-    train_planet_data_airs[planet_id] = reduce_data(planet_index, planet_id, path_to_train, adc_info['train'], instrument='AIRS-CH0')
-    train_planet_data_fgs1[planet_id] = reduce_data(planet_index, planet_id, path_to_train, adc_info['train'], instrument='FGS1')
+# for planet_index, planet_id in enumerate(train_planet_ids[0:1]):
+#     train_planet_data_airs[planet_id] = reduce_data(planet_index, planet_id, path_to_train, adc_info['train'], instrument='AIRS-CH0')
+#     train_planet_data_fgs1[planet_id] = reduce_data(planet_index, planet_id, path_to_train, adc_info['train'], instrument='FGS1')
     
 
 print('Information Loaded')
@@ -322,31 +398,31 @@ print('Information Loaded')
 ############################################
 print("Example plot")
 ############################################
-plt.figure(figsize=(20, 20))
-plt.imshow(test_planet_data_airs['499191466'])
-# change x values to wavelengths_airs values
-plt.xticks(ticks=np.arange(0, 282, 20), labels=wavelengths_airs[::20], rotation=45)
-plt.xlabel('Wavelength')
-plt.title('2D Spectra where the colour represents flux at a particular wavelength')
-# add colour bar
-plt.colorbar()
-
-plt.show()
-# plt.scatter(wavelengths_airs, test_planet_data_airs['499191466'][6700])
+# plt.figure(figsize=(20, 20))
+# plt.imshow(test_planet_data_airs['499191466'][4550])
+# # change x values to wavelengths_airs values
+# plt.xticks(ticks=np.arange(0, 282, 20), labels=wavelengths_airs[::20], rotation=45)
 # plt.xlabel('Wavelength')
-# plt.ylabel('Flux')
-# plt.title('1D Spectra')
+# plt.title('2D Spectra where the colour represents flux at a particular wavelength')
+# # add colour bar
+# plt.colorbar()
+
+# plt.show()
+# # plt.scatter(wavelengths_airs, test_planet_data_airs['499191466'][6700])
+# # plt.xlabel('Wavelength')
+# # plt.ylabel('Flux')
+# # plt.title('1D Spectra')
+# # plt.show()
+
+
+# plt.figure(figsize=(20, 20))
+# plt.imshow(test_planet_data_fgs1['499191466'][47568])
+# plt.title('Image with colour representing flux of a particular wavelength')
+# plt.colorbar()
 # plt.show()
 
-
 plt.figure(figsize=(20, 20))
-plt.imshow(test_planet_data_fgs1['499191466'][0])
-plt.title('Image with colour representing flux of a particular wavelength')
-plt.colorbar()
-plt.show()
-
-plt.figure(figsize=(20, 20))
-plt.scatter(wavelengths_airs, train_planet_data_airs['785834'][0])
+plt.scatter(wavelengths_airs, test_planet_data_airs['499191466'][4623])
 plt.xlabel('Wavelength')
 plt.ylabel('Flux')
 plt.title('1D Spectra')
